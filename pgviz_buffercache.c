@@ -1,12 +1,15 @@
 /* #include "pg_shmem_visualizer.h" */
 #include <assert.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 #include <arpa/inet.h>
 #include "raylib/include/raylib.h"
+#include "raylib/include/raymath.h"
 #include "libpq-fe.h"
 
 #define WIDTH  600
@@ -20,6 +23,12 @@
 // https://www.color-hex.com/color-palette/41808
 static Color colors[] = {
     BLACK, // empty block
+    DARKBLUE,
+    BLUE,
+    GREEN,
+    YELLOW,
+    RED,
+
     // Heat Metal Color Palette
     CLITERAL(Color){ 94,   0,   0, 255},
     CLITERAL(Color){189,  55,  10, 255},
@@ -111,42 +120,120 @@ size_t calculate_blocks_per_pixel(size_t pixels, size_t nblocks)
     return nblocks / pixels;
 }
 
-void show_mouse_label(Block *blocks, size_t size)
+void show_buffercache_label(Block *blocks, size_t size, int ntuples, Vector2 offset)
 {
     const int FONT_SIZE = 10;
-    int mouse_x = GetMouseX();
-    int mouse_y = GetMouseY();
+    int mouse_x = GetMouseX() + offset.x;
+    int mouse_y = GetMouseY() + offset.y;
+    int w       = GetScreenWidth();
+    int h       = GetScreenHeight();
+    // "id=1000000000, x=1111, y=1111, b1=11111111, b2=111111111"
+    char label[150];
 
-    char
-        label[100]; // "id=1000000000, x=1111, y=1111, b1=11111111, b2=111111111"
+    mouse_x = (mouse_x >= 0 ? mouse_x : 0);
+    mouse_x = (mouse_x <= w ? mouse_x : w);
 
-    int b1 = (mouse_x / size);
-    int b2 = (mouse_y / size);
-    int id = (b1 + 1) * (b2 + 1);
+    mouse_y = (mouse_y >= 0 ? mouse_y : 0);
+    mouse_y = (mouse_y <= h ? mouse_y : h);
 
-    sprintf(label,
+    /* return (y / 2) * 3 + 1 + (x / 2); */
+    /* int id = (y * size) + x + 1; */
+    int id = ((mouse_y / size) * (w / size)) + (mouse_x / size);
+
+
+    if (id < ntuples) {
+        sprintf(
+            label,
             "bufferid=%d\n"
             "relfilenode=%d\n"
             "usagecount=%d\n"
             "relname=%s\n",
-            blocks[id].block_info->bufferid,
-            blocks[id].block_info->relfilenode,
-            blocks[id].block_info->usagecount,
-            blocks[id].block_info->relname);
+            blocks[id].block_info->bufferid, blocks[id].block_info->relfilenode,
+            blocks[id].block_info->usagecount, blocks[id].block_info->relname
+        );
 
-    DrawRectangle(mouse_x + 2, mouse_y + 2, 110 + MeasureText(blocks[id].block_info->relname, FONT_SIZE), 70, BLACK);
-    DrawText(label, mouse_x + 10, mouse_y + 10, FONT_SIZE, WHITE);
+        DrawRectangle(
+            mouse_x + 2, mouse_y + 2,
+            100 + MeasureText(blocks[id].block_info->relname, FONT_SIZE), 70,
+            BLACK);
+        DrawText(label, mouse_x + 10, mouse_y + 10, FONT_SIZE, WHITE);
+    }
+}
+
+bool pgviz_show_buffercache(PGconn *conn, size_t size, Vector2 offset)
+{
+	PGresult   *res;
+
+    int w = GetScreenWidth();
+    int h = GetScreenHeight();
+
+    res = PQexec(conn, "select bufferid, coalesce(usagecount, 0) as usagecount, "
+                     "relfilenode, coalesce(cls.relname, '?') as relname "
+                     "from pg_buffercache buf "
+                     "left join pg_catalog.pg_class cls using (relfilenode) "
+                     "order by 1;");
+
+    if (PQresultStatus(res) != PGRES_TUPLES_OK) {
+        PQclear(res);
+        return false;
+    }
+
+    Block *blocks = malloc(sizeof(Block) * PQntuples(res));
+
+    for (int i = 0; i < PQntuples(res); i++) {
+        char *bufferid_ptr = PQgetvalue(res, i, 0);
+        int bufferid = strtol(bufferid_ptr, NULL, 10);
+
+        char *usagecount_ptr = PQgetvalue(res, i, 1);
+        int usagecount = strtol(usagecount_ptr, NULL, 10);
+
+        char *relfilenode_ptr = PQgetvalue(res, i, 2);
+        int relfilenode = strtol(relfilenode_ptr, NULL, 10);
+
+        char *relname = PQgetvalue(res, i, 3);
+
+        int x = bufferid % (w / size) - 1;
+        int y = bufferid / (w / size);
+
+        BlockInfo *block_info = malloc(sizeof(BlockInfo));
+        block_info->bufferid = bufferid;
+        block_info->usagecount = usagecount;
+        block_info->relfilenode = relfilenode;
+        block_info->relname = relname;
+
+        blocks[i].block_info = block_info;
+        blocks[i].pos.x = x * size;
+        blocks[i].pos.y = y * size;
+
+        if (size > 1) {
+          DrawRectangle(blocks[i].pos.x, blocks[i].pos.y, size, size,
+                        colors[blocks[i].block_info->usagecount]);
+        } else {
+          DrawPixel(blocks[i].pos.x, blocks[i].pos.y,
+                    colors[blocks[i].block_info->usagecount]);
+        }
+    }
+
+    show_buffercache_label(blocks, size, PQntuples(res), offset);
+
+    for (int i = 0; i < PQntuples(res); i++) {
+        free(blocks[i].block_info);
+    }
+    free(blocks);
+    PQclear(res);
+
+    return true;
 }
 
 int main(int argc, char *argv[])
 {
 	const char *conninfo;
 	PGconn	   *conn;
-	PGresult   *res;
     size_t      size;
+    int result = 0;
 
     if (argc < 2) {
-        size = 2;
+        size = 1;
     } else {
         size = strtoul(argv[1], NULL, 10);
     }
@@ -157,7 +244,7 @@ int main(int argc, char *argv[])
     SetTargetFPS(10);
     SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
 
-    conninfo = "host=/var/run/postgresql port=5437";
+    conninfo = "host=/var/run/postgresql port=5437 dbname=guedes";
     conn = PQconnectdb(conninfo);
 
     if (PQstatus(conn) != CONNECTION_OK) {
@@ -166,70 +253,61 @@ int main(int argc, char *argv[])
         exit(1);
     }
 
+    Camera2D camera = {0};
+    /* camera.target = (Vector2){.x = GetMouseX(), .y = GetMouseY()}; */
+    /* camera.offset = (Vector2){.x = GetScreenWidth()/2.0f, .y = GetScreenHeight()/2.0f}; */
+    camera.rotation = 0.0f;
+    camera.zoom = 1.0f;
+
     while (!WindowShouldClose()) {
+        if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
+            Vector2 delta = GetMouseDelta();
+            delta = Vector2Scale(delta, -1.0f/camera.zoom);
+
+            camera.target = Vector2Add(camera.target, delta);
+        }
+
+        switch (GetKeyPressed()) {
+        case KEY_EQUAL:
+            size++;
+            break;
+        case KEY_MINUS: {
+            if (size > 1) {
+              size--;
+            };
+            break;
+        }
+        case KEY_LEFT:
+            camera.target.x -= 10 * size;
+            break;
+        case KEY_RIGHT:
+            camera.target.x += 10 * size;
+            break;
+        case KEY_UP:
+            camera.target.y -= 10 * size;
+            break;
+        case KEY_DOWN:
+            camera.target.y += 10 * size;
+            break;
+        }
+
         BeginDrawing();
         ClearBackground(GetColor(0x161616AA));
-        int w = GetScreenWidth();
-        int h = GetScreenHeight();
 
-        int pixels = calculate_total_pixels(w, h);
-        size_t blocks_per_pixel = calculate_blocks_per_pixel(pixels, BLOCKS_LEN);
+        BeginMode2D(camera);
 
-        bool has_blocks = true;
-
-        res = PQexec(conn,
-                     "select bufferid, coalesce(usagecount, 0) as usagecount, relfilenode, coalesce(cls.relname, '-') as relname "
-                     "from pg_buffercache buf "
-                     "left join pg_catalog.pg_class cls using (relfilenode);");
-
-        if (PQresultStatus(res) != PGRES_TUPLES_OK) {
-            fprintf(stderr, "%s", PQerrorMessage(conn));
-            PQclear(res);
-            PQfinish(conn);
-            exit(1);
+        if (!pgviz_show_buffercache(conn, size, camera.target)) {
+            fprintf(stderr, "ERROR: %s", PQerrorMessage(conn));
+            result = 1;
+            goto defer;
         }
 
-        Block *blocks = malloc(sizeof(Block) * PQntuples(res));
-
-        for (int i=0; i < PQntuples(res); i++) {
-            char *bufferid_ptr = PQgetvalue(res, i, 0);
-            char *usagecount_ptr = PQgetvalue(res, i, 1);
-            char *relfilenode_ptr = PQgetvalue(res, i, 2);
-            char *relname_ptr = PQgetvalue(res, i, 3);
-
-            int bufferid = strtol(bufferid_ptr, NULL, 10);
-            int usagecount = strtol(usagecount_ptr, NULL, 10);
-            int relfilenode = strtol(relfilenode_ptr, NULL, 10);
-
-            int x = bufferid % (w / size);
-            int y = bufferid / (w / size);
-
-            BlockInfo *block_info = malloc(sizeof(BlockInfo));
-            block_info->bufferid = bufferid;
-            block_info->usagecount = usagecount;
-            block_info->relfilenode = relfilenode;
-            block_info->relname = relname_ptr;
-
-            blocks[i].block_info = block_info;
-            blocks[i].pos.x = x * size;
-            blocks[i].pos.y = y * size;
-
-            if (size > 1) {
-                DrawRectangle(blocks[i].pos.x, blocks[i].pos.y, size, size, colors[blocks[i].block_info->usagecount - 1]);
-            } else {
-                DrawPixel(blocks[i].pos.x, blocks[i].pos.y, colors[blocks[i].block_info->usagecount - 1]);
-            }
-        }
-
-        show_mouse_label(blocks, size);
+        EndMode2D();
         EndDrawing();
-
-        for (int i=0; i < PQntuples(res); i++) {
-            free(blocks[i].block_info);
-        }
-        free(blocks);
-        PQclear(res);
     }
+
+defer:
     CloseWindow();
-    return 0;
+    PQfinish(conn);
+    return result;
 }

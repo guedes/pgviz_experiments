@@ -12,6 +12,19 @@ By "experiments" it means "test". It is not ready to be used in production.
 - libpq-dev
 - libpq5
 
+## Experiments
+
+### `pgviz_buffercache`
+
+Visualize the PostgreSQL shared buffer state at 10 FPS.
+
+| - | 0  | 1  | 2  | 3  | 4  |
+| 0 | 1  | 2  | 3  | 4  | 5  |
+| 1 | 6  | 7  | 8  | 9  | 10 |
+| 2 | 11 | 12 | 13 | 14 | 15 |
+| 3 | 16 | 17 | 18 | 19 | 20 |
+| 4 | 21 |    |    |    |    |
+
 ## LICENSE
 
 The MIT License (MIT)
