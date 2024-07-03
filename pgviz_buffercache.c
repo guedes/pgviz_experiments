@@ -12,8 +12,8 @@
 #include "raylib/include/raymath.h"
 #include "libpq-fe.h"
 
-#define WIDTH  600
-#define HEIGHT 700
+#define WIDTH  100
+#define HEIGHT 100
 #define WINDOW_SIZE WIDTH * HEIGHT
 
 #define BLOCKS_LEN 100000
@@ -122,13 +122,13 @@ size_t calculate_blocks_per_pixel(size_t pixels, size_t nblocks)
 
 void show_buffercache_label(Block *blocks, size_t size, int ntuples, Vector2 offset)
 {
-    const int FONT_SIZE = 10;
+    const int FONT_SIZE = 15;
+    char label[150];
+
     int mouse_x = GetMouseX() + offset.x;
     int mouse_y = GetMouseY() + offset.y;
     int w       = GetScreenWidth();
     int h       = GetScreenHeight();
-    // "id=1000000000, x=1111, y=1111, b1=11111111, b2=111111111"
-    char label[150];
 
     mouse_x = (mouse_x >= 0 ? mouse_x : 0);
     mouse_x = (mouse_x <= w ? mouse_x : w);
@@ -136,10 +136,7 @@ void show_buffercache_label(Block *blocks, size_t size, int ntuples, Vector2 off
     mouse_y = (mouse_y >= 0 ? mouse_y : 0);
     mouse_y = (mouse_y <= h ? mouse_y : h);
 
-    /* return (y / 2) * 3 + 1 + (x / 2); */
-    /* int id = (y * size) + x + 1; */
     int id = ((mouse_y / size) * (w / size)) + (mouse_x / size);
-
 
     if (id < ntuples) {
         sprintf(
@@ -149,9 +146,13 @@ void show_buffercache_label(Block *blocks, size_t size, int ntuples, Vector2 off
             "usagecount=%d\n"
             "relname=%s\n",
             blocks[id].block_info->bufferid, blocks[id].block_info->relfilenode,
-            blocks[id].block_info->usagecount, blocks[id].block_info->relname
+            blocks[id].block_info->usagecount, blocks[id].block_info->relname,
+            w, h,
+            mouse_x, mouse_y
         );
 
+            /* "w=%d h=%d\n" */
+            /* "x=%d y=%d\n", */
         DrawRectangle(
             mouse_x + 2, mouse_y + 2,
             100 + MeasureText(blocks[id].block_info->relname, FONT_SIZE), 70,
@@ -168,10 +169,10 @@ bool pgviz_show_buffercache(PGconn *conn, size_t size, Vector2 offset)
     int h = GetScreenHeight();
 
     res = PQexec(conn, "select bufferid, coalesce(usagecount, 0) as usagecount, "
-                     "relfilenode, coalesce(cls.relname, '?') as relname "
-                     "from pg_buffercache buf "
-                     "left join pg_catalog.pg_class cls using (relfilenode) "
-                     "order by 1;");
+                       "relfilenode, coalesce(cls.relname, '?') as relname "
+                       "from pg_buffercache buf "
+                       "left join pg_catalog.pg_class cls using (relfilenode) "
+                       "order by 1;");
 
     if (PQresultStatus(res) != PGRES_TUPLES_OK) {
         PQclear(res);
@@ -225,26 +226,83 @@ bool pgviz_show_buffercache(PGconn *conn, size_t size, Vector2 offset)
     return true;
 }
 
+void handle_zoom(Camera2D *camera)
+{
+    if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
+        Vector2 delta = GetMouseDelta();
+        delta = Vector2Scale(delta, -1.0f / camera->zoom);
+        delta.x = 0;
+
+        camera->target = Vector2Add(camera->target, delta);
+    }
+}
+
+void handle_keypress(size_t *size, Camera2D *camera)
+{
+    switch (GetKeyPressed()) {
+    case KEY_EQUAL:
+        (*size)++;
+        break;
+    case KEY_MINUS: {
+        if ((*size) > 1) {
+          (*size)--;
+        };
+        break;
+    }
+    case KEY_R: {
+        (*size) = 1;
+        camera->target.x = 0;
+        camera->target.y = 0;
+        camera->zoom = 1.0f;
+        break;
+    }
+    case KEY_LEFT:
+        camera->target.x -= 10 * (*size);
+        break;
+    case KEY_RIGHT:
+        camera->target.x += 10 * (*size);
+        break;
+    case KEY_UP:
+        camera->target.y -= 10 * (*size);
+        break;
+    case KEY_DOWN:
+        camera->target.y += 10 * (*size);
+        break;
+    }
+}
+
 int main(int argc, char *argv[])
 {
-	const char *conninfo;
-	PGconn	   *conn;
-    size_t      size;
-    int result = 0;
+    /* args */
+	char       *conninfo = NULL;
+    size_t      size = 1;
 
-    if (argc < 2) {
-        size = 1;
-    } else {
-        size = strtoul(argv[1], NULL, 10);
+	char       *program_name = argv[0];
+	PGconn	   *conn;
+    int         result = 0;
+    int         i = 0;
+
+    if (argc < 3) {
+        printf("USAGE: %s --size <size> --conninfo <conninfo>\n", program_name);
+        exit(1);
+    }
+
+    while (i < argc) {
+        if (strcmp(argv[i], "--size") == 0) {
+            size = atoi(argv[i+1]);
+        } else if (strcmp(argv[i], "--conninfo") == 0) {
+            conninfo = argv[i+1];
+        }
+
+        i++;
     }
 
     srand(time(0));
 
     InitWindow(WIDTH, HEIGHT, "PG Shared Buffer Visualizer!");
-    SetTargetFPS(10);
+    SetTargetFPS(5);
     SetMouseCursor(MOUSE_CURSOR_CROSSHAIR);
 
-    conninfo = "host=/var/run/postgresql port=5437 dbname=guedes";
     conn = PQconnectdb(conninfo);
 
     if (PQstatus(conn) != CONNECTION_OK) {
@@ -260,36 +318,9 @@ int main(int argc, char *argv[])
     camera.zoom = 1.0f;
 
     while (!WindowShouldClose()) {
-        if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
-            Vector2 delta = GetMouseDelta();
-            delta = Vector2Scale(delta, -1.0f/camera.zoom);
-
-            camera.target = Vector2Add(camera.target, delta);
-        }
-
-        switch (GetKeyPressed()) {
-        case KEY_EQUAL:
-            size++;
-            break;
-        case KEY_MINUS: {
-            if (size > 1) {
-              size--;
-            };
-            break;
-        }
-        case KEY_LEFT:
-            camera.target.x -= 10 * size;
-            break;
-        case KEY_RIGHT:
-            camera.target.x += 10 * size;
-            break;
-        case KEY_UP:
-            camera.target.y -= 10 * size;
-            break;
-        case KEY_DOWN:
-            camera.target.y += 10 * size;
-            break;
-        }
+        handle_zoom(&camera);
+        handle_keypress(&size, &camera);
+        assert(size > 0);
 
         BeginDrawing();
         ClearBackground(GetColor(0x161616AA));
